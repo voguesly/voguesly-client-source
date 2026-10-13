@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -373,10 +374,9 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		}
 
 		if options.AutoDetectInterface {
-			l.cDialerInterfaceFinder = &cDialerInterfaceFinder{
-				tunName:                 tunName,
-				defaultInterfaceMonitor: defaultInterfaceMonitor,
-			}
+			finder := &cDialerInterfaceFinder{defaultInterfaceMonitor: defaultInterfaceMonitor}
+			finder.tunName.Store(tunName)
+			l.cDialerInterfaceFinder = finder
 			if !dialer.DefaultInterfaceFinder.CompareAndSwap(nil, l.cDialerInterfaceFinder) {
 				err = E.New("not allowed two tun listener using auto-detect-interface")
 				return
@@ -470,10 +470,17 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		}
 
 	}
-	tunIf, err := tunNew(tunOptions)
+	tunIf, err := tunNew(&tunOptions)
 	if err != nil {
 		err = E.Cause(err, "configure tun interface")
 		return
+	}
+	if tunOptions.Name != tunName { // tunNew 可能换了备用网卡名,后续一律以实际生效的为准
+		tunName = tunOptions.Name
+		l.tunName = tunName
+		if l.cDialerInterfaceFinder != nil {
+			l.cDialerInterfaceFinder.(*cDialerInterfaceFinder).tunName.Store(tunName)
+		}
 	}
 
 	l.dnsServerIp = dnsServerIp
@@ -598,7 +605,7 @@ func (l *Listener) OnReload() {
 }
 
 type cDialerInterfaceFinder struct {
-	tunName                 string
+	tunName                 atomic.Value // string;tunNew 期间可能被换成备用网卡名,而 finder 此前已注册、会被并发读取
 	defaultInterfaceMonitor tun.DefaultInterfaceMonitor
 }
 
@@ -615,7 +622,7 @@ func (d *cDialerInterfaceFinder) DefaultInterfaceName(destination netip.Addr) st
 func (d *cDialerInterfaceFinder) FindInterfaceName(destination netip.Addr) string {
 	for _, dest := range []netip.Addr{destination, netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
 		autoDetectInterfaceName := d.DefaultInterfaceName(dest)
-		if autoDetectInterfaceName == d.tunName {
+		if tunName, _ := d.tunName.Load().(string); autoDetectInterfaceName == tunName {
 			log.Warnln("[TUN] Auto detect interface for %s get same name with tun", destination.String())
 		} else if autoDetectInterfaceName == "" || autoDetectInterfaceName == "<nil>" {
 			log.Warnln("[TUN] Auto detect interface for %s get empty name.", destination.String())

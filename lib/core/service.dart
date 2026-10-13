@@ -21,6 +21,11 @@ const kCoreProcessStartFailedReason = 'core-process-start-failed';
 /// 核心运行中意外断开(唔係我哋主动停)。技术标识,唔畀用户睇 —— UI 喺 onCrash 转中文。
 const kCoreUnexpectedExitReason = 'core done';
 
+/// Windows 硬杀核心之前,等核心自己关好虚拟网卡(ActionMethod.shutdown)的最长时间。
+/// ⚠️ 不能比 2s 长:`SystemAction.handleExit` 有个 3s 后强制 `system.exit()` 的兜底,
+/// 核心卡死时「优雅等待 + helper /stop」必须赶在它之前,否则 App 先退、核心变孤儿。
+const kCoreGracefulStopTimeout = Duration(seconds: 2);
+
 /// [0.9.89] 断线係咪我哋主动停核心引起(10 秒内)。抽出嚟方便单测。
 bool isIntentionalCoreDisconnect(DateTime? stopAt, DateTime now) =>
     stopAt != null && now.difference(stopAt) < const Duration(seconds: 10);
@@ -234,6 +239,14 @@ class CoreService extends CoreHandlerInterface {
       _intentionalStopAt = DateTime.now();
     }
     if (system.isWindows) {
+      // [2026-10-12] helper 的 /stop 是 TerminateProcess,核心来不及 tun.Close() →
+      // WintunCloseAdapter,虚拟网卡设备节点留给内核/PnP 善后;客户日志里出现过之后同名网卡
+      // 再也建不起来(15s 超时 + 「系统找不到指定的文件」)、只有重启 Windows 才恢复。
+      // 所以硬杀之前先让核心自己收尾(ActionMethod.shutdown 会同步等到网卡关闭才返回)。
+      // 带逾时、失败照旧硬杀:这里绝不能把 UI 卡住。
+      if (_transport.isConnected) {
+        await _gracefulStopCore();
+      }
       await request.stopCoreByHelper();
     }
     _transport.disconnected();
@@ -244,6 +257,27 @@ class CoreService extends CoreHandlerInterface {
       return _shutdownCompleter.future;
     } else {
       return true;
+    }
+  }
+
+  Future<void> _gracefulStopCore() async {
+    try {
+      final done = await invoke<bool>(
+        method: ActionMethod.shutdown,
+        timeout: kCoreGracefulStopTimeout,
+      );
+      if (done != true) {
+        commonPrint.log(
+          'Core graceful shutdown did not confirm within '
+          '${kCoreGracefulStopTimeout.inSeconds}s; falling back to hard stop',
+          logLevel: LogLevel.warning,
+        );
+      }
+    } catch (e) {
+      commonPrint.log(
+        'Core graceful shutdown failed: $e; falling back to hard stop',
+        logLevel: LogLevel.warning,
+      );
     }
   }
 

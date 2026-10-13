@@ -26,6 +26,34 @@ import 'package:path/path.dart';
 String tunDeviceNameFor(String device) =>
     Platform.isLinux ? sanitizeLinuxTunDevice(device) : device;
 
+/// 把客户端管理的 tun 字段写进 Clash 配置(就地改 [rawConfig] 嘅 `tun` 块,
+/// 订阅里其它字段原样保留;纯函数,单测见 test/common/tun_config_test.dart)。
+///
+/// [onWindows] 只为单测而设,默认取当前平台。
+///
+/// ⚠️ `strict-route` **只喺 Windows 写**:完整重载以前漏写 ⇒ 退回内核默认 false ⇒
+/// 多网卡时系统 DNS 由非 TUN 网卡直出运营商 DNS。**唔可以无条件写** ——
+/// macOS / Linux 算出来係 false,无条件写会覆盖订阅里已有嘅 true。
+Map<String, dynamic> applyTunToConfig(
+  Map<String, dynamic> rawConfig,
+  Tun tun, {
+  bool? onWindows,
+}) {
+  if (rawConfig['tun'] == null) {
+    rawConfig['tun'] = {};
+  }
+  rawConfig['tun']['enable'] = tun.enable;
+  rawConfig['tun']['device'] = tunDeviceNameFor(tun.device);
+  rawConfig['tun']['dns-hijack'] = tun.dnsHijack;
+  rawConfig['tun']['stack'] = tun.stack.name;
+  rawConfig['tun']['route-address'] = tun.routeAddress;
+  rawConfig['tun']['auto-route'] = tun.autoRoute;
+  if (onWindows ?? system.isWindows) {
+    rawConfig['tun']['strict-route'] = tun.strictRoute;
+  }
+  return rawConfig;
+}
+
 /// 名字本身已经係内核收嘅 ifname 就原样用,否则一律换成 [kLinuxTunDevice]
 /// (纯函数,单测见 test/common/tun_device_test.dart)。
 /// 判据照 Linux `dev_valid_name()`:非空、少于 16 字节、唔可以係 `.` / `..`、
@@ -124,7 +152,7 @@ Future<VM2<String, String>> makeRealProfileTask(
 Future<VM2<String, String>> _makeRealProfileTask(
   MakeRealProfileState data,
 ) async {
-  final rawConfig = Map.from(data.rawConfig);
+  final rawConfig = Map<String, dynamic>.from(data.rawConfig);
   final realPatchConfig = data.realPatchConfig;
   final profilesPath = data.profilesPath;
   final profileId = data.profileId;
@@ -161,15 +189,7 @@ Future<VM2<String, String>> _makeRealProfileTask(
   rawConfig['find-process-mode'] = realPatchConfig.findProcessMode.name;
   rawConfig['allow-lan'] = realPatchConfig.allowLan;
   rawConfig['mode'] = realPatchConfig.mode.name;
-  if (rawConfig['tun'] == null) {
-    rawConfig['tun'] = {};
-  }
-  rawConfig['tun']['enable'] = realPatchConfig.tun.enable;
-  rawConfig['tun']['device'] = tunDeviceNameFor(realPatchConfig.tun.device);
-  rawConfig['tun']['dns-hijack'] = realPatchConfig.tun.dnsHijack;
-  rawConfig['tun']['stack'] = realPatchConfig.tun.stack.name;
-  rawConfig['tun']['route-address'] = realPatchConfig.tun.routeAddress;
-  rawConfig['tun']['auto-route'] = realPatchConfig.tun.autoRoute;
+  applyTunToConfig(rawConfig, realPatchConfig.tun);
   rawConfig['geodata-loader'] = realPatchConfig.geodataLoader.name;
   if (rawConfig['sniffer']?['sniff'] != null) {
     for (final value in (rawConfig['sniffer']?['sniff'] as Map).values) {

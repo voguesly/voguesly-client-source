@@ -4,6 +4,8 @@ go 1.21
 
 replace github.com/metacubex/mihomo => ./Clash.Meta
 
+replace github.com/metacubex/sing-tun => ./third_party/sing-tun
+
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/metacubex/mihomo v0.0.0-00010101000000-000000000000
