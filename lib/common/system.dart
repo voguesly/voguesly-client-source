@@ -642,9 +642,10 @@ class System {
       if (isWindows) {
         // [0.9.96] 原本只睇「有冇 198.18 路由」—— 第三方 TUN(官方 FlClash / Clash Verge)都用 198.18,
         //   09-30 实测:官方 FlClash 占住网络、易联自己张网卡根本冇起,呢个判断照返 true ⇒ 绿灯「已连接」但上唔到网。
-        //   而家要:① 见到易联自己张网卡(名 = appName)② 冇第三方代理网卡同我哋抢。
+        //   而家要:① 见到易联自己张网卡(名 = appName,**或换名自愈后嘅 appName-2**,见 [isOurTunName])
+        //          ② 冇第三方代理网卡同我哋抢。
         final ifaces = await NetworkInterface.list(includeLoopback: false);
-        final ours = ifaces.any((i) => i.name == appName);
+        final ours = ifaces.any((i) => isOurTunName(i.name));
         if (!ours) return false;
         final other = foreignTunOwnerFromNames(ifaces.map((i) => i.name));
         if (other != null) {
@@ -1089,14 +1090,30 @@ final macOS = system.isMacOS ? MacOS() : null;
 /// 同「重新打开「Clash Verge(服务模式)」」,用户根本冇得「打开」一个服务。诊断报告仍然用完整名。
 String userFacingProxyName(String name) => name.replaceAll(RegExp(r'\s*[（(]服务模式[)）]$'), '');
 
+/// [0.9.100] 呢个网卡名係咪「易联自己」嘅。
+///
+/// 🔴 点解唔可以只认 [appName]:内核 Windows 侧有一条**换名自愈**
+/// (Clash.Meta `listener/sing_tun/fallback.go` ⇒ `fallbackTunName(name) = name + "-2"`):
+/// 原网卡名撞到 wintun「找不到文件」错、且单次创建耗时 ≥10 秒时,内核会改用 `原名-2` 重建。
+/// **呢个时候网卡其实已经建好、流量照走**,但 Dart 侧如果只认 `appName`,就会漏认 ⇒
+/// 判「TUN 冇起到」⇒ 触发 `controlled core/TUN recovery` ⇒ 内核重启 ⇒ 再判错 ⇒ 死循环。
+/// (2026-10-13 uid 44 工单 #39 日志实证:`desktop transport ok=false` 反复 + `CORE-RECOVER`。)
+///
+/// ⚠️ **只收内核真实会产生嘅后缀**(目前唯一:`-2`),唔可以用 `startsWith('$appName-')` ——
+/// 咁样会连 `易联 voguesly-随便咩名` 都当自己,增加把残留 / 人为改名网卡认作本次会话嘅风险。Codex 2026-10-13 审计意见。
+bool isOurTunName(String raw) {
+  final name = raw.trim();
+  return name == appName || name == '$appName-2' || name == kLinuxTunDevice;
+}
+
 /// [0.9.96] 由网卡名认出第三方代理软件嘅虚拟网卡(Windows 网卡「名称」,即 Get-NetAdapter 嘅 Name)。
 /// 易联自己张叫 [appName],永远唔算。「Meta」/「Mihomo」係 mihomo 内核默认名,多个软件共用 ⇒ 返通用名,由调用方再按进程细分。
 /// ⚠️ 只认代理软件嘅网卡,唔好将公司 VPN / WireGuard 等当冲突(佢哋名由用户自定,冇固定特征)。
 String? foreignTunOwnerFromNames(Iterable<String> names) {
   for (final raw in names) {
     final name = raw.trim();
-    // 易联自己:Windows 网卡叫 appName;Linux 叫 kLinuxTunDevice(见 task.dart tunDeviceNameFor)。
-    if (name.isEmpty || name == appName || name == kLinuxTunDevice) continue;
+    // 易联自己:Windows 网卡叫 appName(**或换名自愈后嘅 appName-2**);Linux 叫 kLinuxTunDevice。
+    if (name.isEmpty || isOurTunName(name)) continue;
     final n = name.toLowerCase();
     if (n == 'flclash' || n.startsWith('flclash')) return 'FlClash(官方版)';
     if (n == 'meta' || n.startsWith('mihomo') || n == 'clash' || n.startsWith('clash')) return 'Clash 类代理软件';
